@@ -1,10 +1,11 @@
 import 'package:flutter/material.dart';
+
 import '../../../../domain/models/customer_model.dart';
+import '../../../../domain/models/maritime_departure_model.dart';
 import '../../../../infrastructure/services/maritime_departure_service.dart';
 import '../../../widgets/grid-custome/gridview_header.dart';
 import '../../../widgets/grid-custome/organisms/customer_grid_row.dart';
 import '../../lake_maritime/lake_maritime_view_header.dart';
-import '../../../../domain/models/maritime_departure_model.dart';
 
 class TabRegisterPage extends StatefulWidget {
   const TabRegisterPage({super.key});
@@ -16,7 +17,7 @@ class TabRegisterPage extends StatefulWidget {
 class _TabRegisterPageState extends State<TabRegisterPage> {
   List<CustomerModel> customers = [CustomerModel.empty()];
   final MaritimeDepartureService maritimeDepartureService =
-  MaritimeDepartureService();
+      MaritimeDepartureService();
   bool isLoading = false;
   void addCustomerRow() {
     setState(() {
@@ -39,30 +40,33 @@ class _TabRegisterPageState extends State<TabRegisterPage> {
   bool allFieldsValid() {
     if (customers.isEmpty) return false;
     for (var customer in customers) {
-      if (customer.fullName.isEmpty ||
-          customer.documentNumber.isEmpty ) {
+      if (customer.fullName.isEmpty || customer.documentNumber.isEmpty) {
         return false;
       }
     }
     return true;
   }
+
   Future<void> saveRegisters() async {
     setState(() => isLoading = true);
-
+    final now = DateTime.now();
+    // ISO 8601 sin milisegundos, ejemplo: 2025-12-01T17:23:45
+    final String arrivalTime = now.toIso8601String().split('.').first;
     try {
       var model = MaritimeDepartureModel(
         businessId: 1,
         userId: 1,
         userManagementId: 5,
-        arrivalTime: "2025-08-06T10:00:00",
+        arrivalTime: arrivalTime,
         responsibleName: "Alex Alba",
       );
 
       final payload = maritimeDepartureService
           .buildMaritimeDeparturePayloadObject(customers, model);
 
-      final sendUseCase =
-      SendMaritimeDepartureUseCase(MaritimeDepartureService());
+      final sendUseCase = SendMaritimeDepartureUseCase(
+        MaritimeDepartureService(),
+      );
       final data = await sendUseCase.execute(payload);
 
       if (data.success) {
@@ -71,18 +75,17 @@ class _TabRegisterPageState extends State<TabRegisterPage> {
         });
       }
 
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text(data.message)),
-      );
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text(data.message)));
     } catch (e) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Error al guardar: $e')),
-      );
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('Error al guardar: $e')));
     } finally {
       setState(() => isLoading = false);
     }
   }
-
 
   @override
   Widget build(BuildContext context) {
@@ -103,7 +106,7 @@ class _TabRegisterPageState extends State<TabRegisterPage> {
                     nombreResponsable: "Cesar Iban Alba",
                     identificacion: "1002954889",
                     imageUrl:
-                    "https://meetclic.com/public/uploads/business/information/1598107770_Empresa.jpg",
+                        "https://meetclic.com/public/uploads/business/information/logomuellecatalina.png",
                   ),
                   GridViewHeader(),
                   const SizedBox(height: 8),
@@ -139,31 +142,28 @@ class _TabRegisterPageState extends State<TabRegisterPage> {
                             : const Text('Enviar Registro Embarque'),
                         icon: isLoading
                             ? const SizedBox(
-                          height: 16,
-                          width: 16,
-                          child: CircularProgressIndicator(
-                            strokeWidth: 2,
-                            color: Colors.white,
-                          ),
-                        )
+                                height: 16,
+                                width: 16,
+                                child: CircularProgressIndicator(
+                                  strokeWidth: 2,
+                                  color: Colors.white,
+                                ),
+                              )
                             : const Icon(Icons.save),
                         heroTag: 'saveButton',
-                        backgroundColor:
-                        isLoading || !isValid ? Colors.grey : Colors.blue,
+                        backgroundColor: isLoading || !isValid
+                            ? Colors.grey
+                            : Colors.blue,
                       ),
                     ],
-                  )
+                  ),
                 ],
               ),
             ),
           ),
-          if (isLoading)
-            const Center(
-              child: CircularProgressIndicator(),
-            ),
+          if (isLoading) const Center(child: CircularProgressIndicator()),
         ],
       ),
     );
-
   }
 }

@@ -148,19 +148,28 @@ class ApiDictionaryWordDto {
 
   factory ApiDictionaryWordDto.fromJson(Map<String, dynamic> json) {
     return ApiDictionaryWordDto(
-      id: json['id'] as int,
-      translationValue: json['translation_value'] as String,
-      usageContext: json['usage_context'] as String,
-      value: json['value'] as String,
-      description: json['description'] as String,
-      status: json['status'] as String,
-      phoneme: json['phoneme'] as String,
+      id: json['id'] is int
+          ? json['id'] as int
+          : int.tryParse(json['id'].toString()) ?? 0, // default 0
 
-      diccionaryLanguageId: json['diccionary_language_id'] as int,
-      dictionary: (json['dictionary'] as List<dynamic>)
+      translationValue: json['translation_value'] as String? ?? '',
+      usageContext: json['usage_context'] as String? ?? '',
+      value: json['value'] as String? ?? '',
+      description: json['description'] as String? ?? '',
+      status: json['status'] as String? ?? '',
+      phoneme: json['phoneme'] as String? ?? '',
+
+      diccionaryLanguageId: json['diccionary_language_id'] is int
+          ? json['diccionary_language_id'] as int
+          : int.tryParse(json['diccionary_language_id']?.toString() ?? '') ?? 0,
+
+      // 👇 si no viene "dictionary" o viene null, usa lista vacía
+      dictionary: (json['dictionary'] as List<dynamic>? ?? const [])
           .map((e) => ApiDictionaryTagDto.fromJson(e as Map<String, dynamic>))
           .toList(),
-      pronunciations: (json['pronunciations'] as List<dynamic>)
+
+      // 👇 igual para pronunciations
+      pronunciations: (json['pronunciations'] as List<dynamic>? ?? const [])
           .map((e) => ApiPronunciationDto.fromJson(e as Map<String, dynamic>))
           .toList(),
     );

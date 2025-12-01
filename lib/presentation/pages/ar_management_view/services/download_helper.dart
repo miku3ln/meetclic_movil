@@ -1,4 +1,5 @@
 import 'package:dio/dio.dart';
+import 'package:flutter/material.dart';
 
 import 'download_models.dart';
 
@@ -123,4 +124,54 @@ class _MemoEntry {
   final String dataUri;
   final int contentLength;
   const _MemoEntry({required this.dataUri, required this.contentLength});
+}
+
+enum ARLoadStatus { idle, loading, success, error }
+/* =============================================================================
+ * UI Helpers
+ * ========================================================================== */
+
+class UiHelpers {
+  UiHelpers._();
+
+  static void showSnack(
+    BuildContext context,
+    String msg, {
+    bool error = false,
+  }) {
+    final sb = SnackBar(
+      content: Text(msg),
+      backgroundColor: error ? Colors.red[700] : Colors.black87,
+      duration: const Duration(seconds: 3),
+    );
+    ScaffoldMessenger.of(context).showSnackBar(sb);
+  }
+
+  static Color statusColor(ARLoadStatus s) {
+    switch (s) {
+      case ARLoadStatus.loading:
+        return Colors.amber[700]!;
+      case ARLoadStatus.success:
+        return Colors.green[700]!;
+      case ARLoadStatus.error:
+        return Colors.red[700]!;
+      case ARLoadStatus.idle:
+      default:
+        return Colors.blueGrey[600]!;
+    }
+  }
+
+  static String statusText(ARLoadStatus s) {
+    switch (s) {
+      case ARLoadStatus.loading:
+        return 'Cargando…';
+      case ARLoadStatus.success:
+        return 'Listo';
+      case ARLoadStatus.error:
+        return 'Error';
+      case ARLoadStatus.idle:
+      default:
+        return 'Listo';
+    }
+  }
 }

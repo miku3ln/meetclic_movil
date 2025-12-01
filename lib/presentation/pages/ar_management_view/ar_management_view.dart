@@ -16,7 +16,6 @@ import 'package:image_gallery_saver_plus/image_gallery_saver_plus.dart';
 import 'package:path_provider/path_provider.dart';
 
 import '../../../models/totem_management.dart'; // ItemAR, itemsSources
-import '../ar_examples/ar_not_hit_drop_down_page.dart';
 import 'services/ar_config.dart';
 import 'services/ar_service.dart';
 import 'services/download_helper.dart';

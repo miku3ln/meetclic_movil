@@ -35,7 +35,14 @@ android {
         release {
             // TODO: Add your own signing config for the release build.
             // Signing with the debug keys for now, so `flutter run --release` works.
-            signingConfig = signingConfigs.getByName("debug")
+            getByName("release") {
+                // Por ahora firmas con debug, solo para pruebas
+                signingConfig = signingConfigs.getByName("debug")
+
+                // TODO FIX ERROR RELEASE Desactivar R8 y shrink para evitar el error de Sceneform
+                isMinifyEnabled = false
+                isShrinkResources = false
+            }
         }
     }
 }

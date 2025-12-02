@@ -134,12 +134,62 @@ class _ARManagementViewState extends State<ARManagementView> {
     _progressKnown = false;
     UiHelpers.showSnack(context, 'Colocando: ${_selected.id}');
 
+    Timer? _arLoadTimer;
+
+    // Helper para simular progreso mientras AR carga el nodo
+    void startArProgressSimulation({double start = 0.0}) {
+      // empezamos desde el % actual (por si venimos de descarga 100%)
+      double base = start.clamp(0.0, 1.0);
+      _progressKnown = true;
+      _progress = base;
+      setState(() {});
+
+      final stopwatch = Stopwatch()..start();
+      const totalMs = 900; // ~0.9s de animación
+      const tickMs = 60;
+
+      _arLoadTimer?.cancel();
+      _arLoadTimer = Timer.periodic(const Duration(milliseconds: tickMs), (t) {
+        if (!mounted) {
+          t.cancel();
+          return;
+        }
+        final frac = (stopwatch.elapsedMilliseconds / totalMs).clamp(0.0, 0.95);
+        setState(() {
+          _progress = (base + (1.0 - base) * frac).clamp(0.0, 0.95);
+        });
+      });
+    }
+
+    Future<void> stopArProgressSimulation({required bool ok}) async {
+      _arLoadTimer?.cancel();
+      _arLoadTimer = null;
+      if (!mounted) return;
+
+      setState(() {
+        if (ok) {
+          _progress = 1.0;
+          _progressKnown = true;
+        } else {
+          _progressKnown = false;
+        }
+      });
+    }
+
     try {
       final src = _selected.sources; // 👈 estado embebido aquí
 
-      // A) Fast path: ya cargado al menos una vez y con resolvedPath → activar pool (instantáneo)
+      // ============================================================
+      // A) Fast path: ya cargado al menos una vez y con resolvedPath
+      //    -> NO hay descarga, pero AR igual puede tardar en cargar.
+      //    -> Simulamos progreso mientras placeGlbInFront trabaja.
+      // ============================================================
       if (src.loadedOnce && src.resolvedPath != null) {
         final resolved = src.resolvedPath!;
+
+        // Progreso simulado de carga AR desde 0%
+        startArProgressSimulation(start: 0.0);
+
         final ok = await _ar.placeGlbInFront(
           url: resolved,
           isLocal: Uri.parse(resolved).scheme.toLowerCase() == 'file',
@@ -147,11 +197,12 @@ class _ARManagementViewState extends State<ARManagementView> {
           uniformScale: ARConfig.uniformScale,
           initialPreset: ARViewPreset.front,
         );
+
+        await stopArProgressSimulation(ok: ok);
+
         if (ok) {
           setState(() {
             _showReticle = false;
-            _progress = 1.0; // 100%
-            _progressKnown = true; // reuso
           });
           _setStatus(ARLoadStatus.success);
           UiHelpers.showSnack(context, 'Usando caché (memoria/pool)');
@@ -164,7 +215,11 @@ class _ARManagementViewState extends State<ARManagementView> {
         }
       }
 
+      // ============================================================
       // B) Flujo normal (primera vez o cache inválida)
+      //    1) Descarga (con % real)
+      //    2) Carga AR (con % simulado)
+      // ============================================================
       String loadPath = src.glb;
       bool isLocal = src.isLocal;
 
@@ -173,6 +228,7 @@ class _ARManagementViewState extends State<ARManagementView> {
           src.glb,
           onProgress: (r, t) {
             if (!mounted) return;
+
             // guarda progreso temporal en el modelo
             src.setProgress(r, t > 0 ? t : null);
 
@@ -184,6 +240,7 @@ class _ARManagementViewState extends State<ARManagementView> {
         );
 
         if (!res.success || res.data == null) {
+          await stopArProgressSimulation(ok: false);
           _setStatus(ARLoadStatus.error, err: res.message);
           UiHelpers.showSnack(context, '❌ ${res.message}');
           return;
@@ -201,7 +258,17 @@ class _ARManagementViewState extends State<ARManagementView> {
         // aún no marcamos loadedOnce/resolvedPath
       }
 
+      // ============================================================
       // C) Colocar y “sellar” en el modelo
+      //    Aquí ya se descargó (si hacía falta), ahora AR carga el nodo.
+      //    -> Simulamos un pequeño % de “carga AR” si queremos
+      //       (por ejemplo, si la descarga terminó muy rápido).
+      // ============================================================
+      if (_progressKnown && _progress >= 0.99) {
+        // si venimos de descarga 100%, simulamos un pequeño tramo de carga AR
+        startArProgressSimulation(start: _progress);
+      }
+
       final ok = await _ar.placeGlbInFront(
         url: loadPath,
         isLocal: isLocal,
@@ -209,6 +276,8 @@ class _ARManagementViewState extends State<ARManagementView> {
         uniformScale: ARConfig.uniformScale,
         initialPreset: ARViewPreset.front,
       );
+
+      await stopArProgressSimulation(ok: ok);
 
       if (ok) {
         src.sealAfterFirstLoad(
@@ -218,13 +287,13 @@ class _ARManagementViewState extends State<ARManagementView> {
         _setStatus(ARLoadStatus.success);
         setState(() {
           _showReticle = false;
-          _progress = 1.0;
-          _progressKnown = true;
         });
       } else {
         _setStatus(ARLoadStatus.error, err: 'No se pudo añadir el nodo');
       }
     } catch (e) {
+      _arLoadTimer?.cancel();
+      _arLoadTimer = null;
       _setStatus(ARLoadStatus.error, err: '$e');
     }
   }

@@ -1,17 +1,44 @@
+// download_helper.dart
+
+import 'dart:io';
+
 import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
+import 'package:path_provider/path_provider.dart';
 
 import 'download_models.dart';
 
 class DownloadHelper {
+  // 🔹 Este valor ya no se usa para data:URI, pero lo dejamos por si luego quieres
   static const int _defaultDataUriMaxBytes = 8 * 1024 * 1024; // 8 MB
 
-  // 🔸 Memos en memoria:
-  // - data:URI pequeños (con tamaño conocido)
-  static final Map<String, _MemoEntry> _dataMemo = {};
-  // - tamaño (Content-Length) para evitar HEAD repetidos
-  static final Map<String, int> _lenMemo = {};
+  /// Cache en memoria de archivos descargados: url -> entry
+  static final Map<String, _FileCacheEntry> _fileCache = {};
 
+  /// Cliente HTTP global para reutilizar conexiones (keep-alive)
+  static final Dio _dio = Dio(
+    BaseOptions(
+      connectTimeout: const Duration(seconds: 15),
+      receiveTimeout: const Duration(seconds: 60),
+      responseType: ResponseType.bytes,
+      followRedirects: true,
+      receiveDataWhenStatusError: true,
+    ),
+  );
+
+  /// Descarga un recurso binario (GLB) y lo guarda en archivo local (cache).
+  ///
+  /// - Primera vez para una URL:
+  ///    → GET con progreso real
+  ///    → guarda en /cache/ar_mdl_XXXX.glb
+  ///    → devuelve la ruta del archivo local
+  ///
+  /// - Siguientes veces:
+  ///    → si el archivo sigue existiendo, NO descarga
+  ///    → reporta 100% al callback y devuelve la ruta local
+  ///
+  /// El parámetro [dataUriMaxBytes] se mantiene por compatibilidad,
+  /// pero en esta versión siempre se usa archivo local, no data:URI.
   static Future<DownloadResult> fetchToCacheVerbose(
     String url, {
     Map<String, String>? headers,
@@ -19,258 +46,115 @@ class DownloadHelper {
     Duration connectTimeout = const Duration(seconds: 15),
     Duration receiveTimeout = const Duration(seconds: 60),
     int maxRetries = 1,
-    int dataUriMaxBytes = _defaultDataUriMaxBytes,
+    int dataUriMaxBytes =
+        _defaultDataUriMaxBytes, // 👈 no se usa, pero se mantiene
     bool forceRefresh = false,
   }) async {
-    final dio = Dio(
-      BaseOptions(
-        connectTimeout: connectTimeout,
-        receiveTimeout: receiveTimeout,
-        responseType: ResponseType.bytes,
-        headers: headers,
-        followRedirects: true,
-        receiveDataWhenStatusError: true,
-      ),
-    );
+    // Actualizar opciones globales de Dio para esta llamada
+    _dio.options.connectTimeout = connectTimeout;
+    _dio.options.receiveTimeout = receiveTimeout;
+    if (headers != null) {
+      _dio.options.headers.addAll(headers);
+    }
 
-    int? contentLength;
-    String? headReason; // <-- para saber por qué no tenemos content-length
+    // ===============================
+    // 0) Si ya está en cache y no se fuerza refresh
+    // ===============================
+    if (!forceRefresh && _fileCache.containsKey(url)) {
+      final entry = _fileCache[url]!;
+      final file = File(entry.localPath);
 
-    // ===========================
-    // 0) Intentar leer desde memo
-    // ===========================
-    if (!forceRefresh && _lenMemo.containsKey(url)) {
-      contentLength = _lenMemo[url];
-    } else {
-      // ===================================
-      // 1) Intentar HEAD para obtener tamaño
-      // ===================================
-      try {
-        final head = await dio.head(
-          url,
-          options: Options(
-            followRedirects: true,
-            // No lances excepción sólo por status != 200
-            validateStatus: (s) => s != null && s < 500,
-          ),
+      if (await file.exists()) {
+        // Notificamos 100%
+        onProgress?.call(entry.sizeBytes, entry.sizeBytes);
+
+        return DownloadResult(
+          success: true,
+          data: entry.localPath, // 👈 ruta local del archivo
+          bytesReceived: entry.sizeBytes,
+          totalBytes: entry.sizeBytes,
+          extra: const {'isFile': true, 'source': 'cache-file'},
         );
-
-        final status = head.statusCode ?? 0;
-
-        if (status >= 200 && status < 300) {
-          // HEAD OK pero puede o no traer content-length
-          final lenStr = head.headers.value('content-length');
-
-          if (lenStr != null) {
-            contentLength = int.tryParse(lenStr);
-            if (contentLength != null) {
-              _lenMemo[url] = contentLength!;
-              headReason = 'ok-with-content-length';
-            } else {
-              headReason = 'invalid-content-length-format';
-            }
-          } else {
-            // Respuesta correcta pero sin cabecera de tamaño
-            headReason = 'no-content-length-header';
-          }
-        } else {
-          // HEAD respondió pero con status "raro"
-          if (status == 405) {
-            headReason = 'method-not-allowed'; // Servidor no soporta HEAD
-          } else if (status == 403) {
-            headReason = 'forbidden';
-          } else if (status == 404) {
-            headReason = 'not-found';
-          } else if (status == 301 ||
-              status == 302 ||
-              status == 307 ||
-              status == 308) {
-            headReason = 'redirect-without-final-head';
-          } else {
-            headReason = 'unexpected-status-$status';
-          }
-        }
-
-        // Debug opcional
-        // ignore: avoid_print
-        print(
-          '[DownloadHelper] HEAD $url -> status=$status, reason=$headReason',
-        );
-        // ignore: avoid_print
-        print('[DownloadHelper] HEAD headers: ${head.headers.map}');
-      } on DioException catch (e) {
-        // Posibles causas de error en dio.head
-        switch (e.type) {
-          case DioExceptionType.connectionTimeout:
-            headReason = 'connection-timeout';
-            break;
-          case DioExceptionType.sendTimeout:
-            headReason = 'send-timeout';
-            break;
-          case DioExceptionType.receiveTimeout:
-            headReason = 'receive-timeout';
-            break;
-          case DioExceptionType.badResponse:
-            final status = e.response?.statusCode;
-            headReason = 'bad-response-${status ?? 'unknown'}';
-            break;
-          case DioExceptionType.cancel:
-            headReason = 'request-cancelled';
-            break;
-          case DioExceptionType.badCertificate:
-            headReason = 'bad-certificate';
-            break;
-          case DioExceptionType.connectionError:
-            headReason = 'connection-error';
-            break;
-          case DioExceptionType.unknown:
-          default:
-            headReason = 'unknown-dio-error';
-            break;
-        }
-
-        // Debug opcional
-        // ignore: avoid_print
-        print(
-          '[DownloadHelper] HEAD error for $url -> type=${e.type}, reason=$headReason, error=$e',
-        );
-      } catch (e, st) {
-        // Cualquier error no esperado
-        headReason = 'unexpected-exception-${e.runtimeType}';
-        // ignore: avoid_print
-        print('[DownloadHelper] HEAD unexpected error for $url -> $e');
-        // ignore: avoid_print
-        print(st);
+      } else {
+        // Si el archivo desapareció del sistema, limpiamos cache en memoria
+        _fileCache.remove(url);
       }
     }
 
-    // =======================================================
-    // 2) Decidir si podemos usar data:URI o no
-    // =======================================================
-    final canDataUri =
-        (contentLength != null &&
-        contentLength > 0 &&
-        contentLength <= dataUriMaxBytes);
-
-    // Archivo demasiado grande para data:URI
-    final isTooBigForDataUri =
-        (contentLength != null && contentLength > dataUriMaxBytes);
-
-    // 2.1) Reusar data:URI en memoria si aplica
-    if (!forceRefresh && canDataUri && _dataMemo.containsKey(url)) {
-      final m = _dataMemo[url]!;
-      onProgress?.call(m.contentLength, m.contentLength); // 100%
-      return DownloadResult(
-        success: true,
-        data: m.dataUri,
-        bytesReceived: m.contentLength,
-        totalBytes: m.contentLength,
-        extra: {
-          'isDataUri': true,
-          'source': 'mem',
-          if (headReason != null) 'headReason': headReason,
-        },
-      );
-    }
-
-    // 2.2) Caso A: archivo demasiado grande para data:URI
-    //      -> Hacemos GET solo para mostrar progreso, pero devolvemos la URL https.
-    if (isTooBigForDataUri) {
-      if (onProgress != null) {
-        try {
-          await dio.get<List<int>>(
-            url,
-            onReceiveProgress: (r, t) {
-              // t debería ser == contentLength; si no, usamos contentLength conocido
-              final total = (t > 0) ? t : (contentLength ?? t);
-              onProgress(r, total);
-            },
-            options: Options(responseType: ResponseType.bytes),
-          );
-        } catch (e) {
-          // Si falla esta descarga de "previsualización", igual devolvemos la URL
-          // y dejamos que el plugin AR haga su trabajo.
-          // ignore: avoid_print
-          print('[DownloadHelper] preview GET failed for $url: $e');
-        }
-      }
-
-      return DownloadResult(
-        success: true,
-        data: url,
-        extra: {
-          'isDataUri': false,
-          'source': 'https-large',
-          'canDataUri': false,
-          'contentLength': contentLength,
-          if (headReason != null) 'headReason': headReason,
-        },
-      );
-    }
-
-    // 2.3) Caso B: no podemos usar data:URI (tamaño desconocido/0 o HEAD falló)
-    if (!canDataUri) {
-      // Aquí ya sabemos por qué no: tamaño desconocido, muy grande sin HEAD, etc.
-      return DownloadResult(
-        success: true,
-        data: url,
-        extra: {
-          'isDataUri': false,
-          'source': 'https',
-          'canDataUri': false,
-          'contentLength': contentLength,
-          if (headReason != null) 'headReason': headReason,
-        },
-      );
-    }
-
-    // =======================================================
-    // 3) Descargar con progreso y construir data:URI
-    // =======================================================
+    // ===============================
+    // 1) Descarga real (GET con progreso)
+    // ===============================
     for (int attempt = 0; attempt <= maxRetries; attempt++) {
       try {
-        final res = await dio.get<List<int>>(
+        int? totalFromServer;
+
+        final res = await _dio.get<List<int>>(
           url,
-          onReceiveProgress: (r, t) => onProgress?.call(r, t),
-          options: Options(responseType: ResponseType.bytes),
+          options: Options(
+            responseType: ResponseType.bytes,
+            // headers específicos por request (si quisieras sobreescribir)
+            // headers: headers,
+          ),
+          onReceiveProgress: (received, total) {
+            // Dio intenta leer Content-Length:
+            //  - si total > 0 → tenemos tamaño real
+            //  - si total <= 0 → el server no lo mandó
+            if (total > 0) {
+              totalFromServer = total;
+              onProgress?.call(received, total);
+            } else {
+              // Sin tamaño conocido; reportamos lo recibido con total=0
+              onProgress?.call(received, 0);
+            }
+          },
         );
 
         final status = res.statusCode ?? 0;
         final data = res.data;
 
-        if (status == 200 && data != null) {
-          final dataUri = Uri.dataFromBytes(
-            data,
-            mimeType: 'model/gltf-binary',
-          ).toString();
-
-          final len = contentLength ?? data.length;
-          _dataMemo[url] = _MemoEntry(dataUri: dataUri, contentLength: len);
-
+        if (status != 200 || data == null) {
           return DownloadResult(
-            success: true,
-            data: dataUri,
-            bytesReceived: data.length,
-            totalBytes: len,
-            extra: {
-              'isDataUri': true,
-              'source': 'mem/new',
-              if (headReason != null) 'headReason': headReason,
-            },
+            success: false,
+            message: 'HTTP $status',
+            extra: const {'phase': 'get'},
           );
         }
 
+        final bytes = data;
+        final len = totalFromServer ?? bytes.length;
+
+        // ===============================
+        // 2) Guardar en archivo local (cache)
+        // ===============================
+        final dir = await getTemporaryDirectory();
+
+        // Nombre determinista a partir de la URL (para reuso)
+        final safeHash = url.hashCode;
+        final filePath = '${dir.path}/ar_mdl_$safeHash.glb';
+
+        final file = File(filePath);
+        await file.writeAsBytes(bytes, flush: true);
+
+        final entry = _FileCacheEntry(
+          url: url,
+          localPath: filePath,
+          sizeBytes: len,
+          downloadedAt: DateTime.now(),
+        );
+
+        _fileCache[url] = entry;
+
+        // Aseguramos 100% al final
+        onProgress?.call(len, len);
+
         return DownloadResult(
-          success: false,
-          message: 'HTTP $status',
-          extra: {
-            'phase': 'get',
-            'status': status,
-            if (headReason != null) 'headReason': headReason,
-          },
+          success: true,
+          data: entry.localPath, // 👈 siempre ruta local
+          bytesReceived: bytes.length,
+          totalBytes: len,
+          extra: const {'isFile': true, 'source': 'file/new'},
         );
       } on DioException catch (e) {
-        // Error en GET, también detallado
         if (attempt == maxRetries) {
           return DownloadResult(
             success: false,
@@ -280,39 +164,44 @@ class DownloadHelper {
               'dioType': e.type.toString(),
               if (e.response?.statusCode != null)
                 'status': e.response!.statusCode,
-              if (headReason != null) 'headReason': headReason,
             },
           );
         }
-        await Future.delayed(const Duration(milliseconds: 350));
+        // Pequeño backoff antes del reintento
+        await Future.delayed(const Duration(milliseconds: 300));
       } catch (e) {
         if (attempt == maxRetries) {
           return DownloadResult(
             success: false,
             message: e.toString(),
-            extra: {
-              'phase': 'get',
-              'errorType': e.runtimeType.toString(),
-              if (headReason != null) 'headReason': headReason,
-            },
+            extra: {'phase': 'get', 'errorType': e.runtimeType.toString()},
           );
         }
-        await Future.delayed(const Duration(milliseconds: 350));
+        await Future.delayed(const Duration(milliseconds: 300));
       }
     }
 
     return const DownloadResult(success: false, message: 'Descarga cancelada.');
   }
 
+  /// Hook para, si más adelante quieres, borrar archivos de cache asociados.
   static void revokeIfNeeded(String? url) {
-    /* noop */
+    // Por ahora noop
   }
 }
 
-class _MemoEntry {
-  final String dataUri;
-  final int contentLength;
-  const _MemoEntry({required this.dataUri, required this.contentLength});
+class _FileCacheEntry {
+  final String url;
+  final String localPath;
+  final int sizeBytes;
+  final DateTime downloadedAt;
+
+  _FileCacheEntry({
+    required this.url,
+    required this.localPath,
+    required this.sizeBytes,
+    required this.downloadedAt,
+  });
 }
 
 enum ARLoadStatus { idle, loading, success, error }
